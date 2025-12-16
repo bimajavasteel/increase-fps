@@ -1,5 +1,6 @@
 # ============================================================
-# Practical-RIFE – FINAL STABLE VIDEO INFERENCE (NO skvideo)
+# Practical-RIFE – FINAL STABLE VIDEO INFERENCE
+# FIXED: FFmpeg write error | NO sk-video
 # Compatible: RIFE v4.26 | Kaggle CUDA T4 | Python 3.10+
 # ============================================================
 
@@ -52,7 +53,7 @@ def load_rife_model(model_dir):
     model.eval()
     model.device()
 
-    # ✅ FP16 YANG BENAR UNTUK RIFE
+    # FP16 yang BENAR untuk RIFE
     if USE_FP16 and hasattr(model, "net"):
         model.net.half()
 
@@ -64,7 +65,7 @@ def load_rife_model(model_dir):
 model = load_rife_model(args.model)
 
 # ============================================================
-# VIDEO INPUT / OUTPUT (OpenCV ONLY)
+# VIDEO INPUT
 # ============================================================
 cap = cv2.VideoCapture(args.video)
 if not cap.isOpened():
@@ -76,13 +77,35 @@ w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
 out_fps = fps * args.multi
+
+# Guard FPS (encoder safety)
+if out_fps > 120:
+    print(f"⚠️ FPS terlalu tinggi ({out_fps}), diturunkan ke 120")
+    out_fps = 120
+
 output_path = args.output or f"{os.path.splitext(args.video)[0]}_{args.multi}X.mp4"
 
-fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-writer = cv2.VideoWriter(output_path, fourcc, out_fps, (w, h))
+# ============================================================
+# VIDEO WRITER (FFMPEG SAFE)
+# ============================================================
+fourcc_candidates = [
+    cv2.VideoWriter_fourcc(*"avc1"),  # H.264 (BEST)
+    cv2.VideoWriter_fourcc(*"H264"),
+    cv2.VideoWriter_fourcc(*"XVID"),  # fallback
+]
+
+writer = None
+for fourcc in fourcc_candidates:
+    writer = cv2.VideoWriter(output_path, fourcc, out_fps, (w, h))
+    if writer.isOpened():
+        print(f"✅ VideoWriter OK dengan FOURCC={fourcc}")
+        break
+
+if not writer or not writer.isOpened():
+    raise RuntimeError("❌ Gagal membuka VideoWriter (codec FFmpeg tidak tersedia)")
 
 # ============================================================
-# PADDING (KONSISTEN & AMAN)
+# PADDING (KONSISTEN)
 # ============================================================
 def pad_tensor(x):
     base = max(128, int(128 / args.scale))
@@ -133,10 +156,10 @@ while True:
 
     mids = interpolate(I0, I1, args.multi - 1)
 
-    # frame asli
+    # tulis frame asli
     writer.write(prev_frame[:, :, ::-1])
 
-    # frame interpolasi
+    # tulis frame interpolasi
     for mid in mids:
         img = (mid[0].clamp(0, 1) * 255).byte().cpu().numpy().transpose(1, 2, 0)
         writer.write(img[:, :, ::-1])
@@ -145,12 +168,12 @@ while True:
     I0 = I1
     pbar.update(1)
 
-# frame terakhir
+# tulis frame terakhir
 writer.write(prev_frame[:, :, ::-1])
 
 pbar.close()
 cap.release()
 writer.release()
 
-print("✅ SELESAI TANPA sk-video")
+print("✅ SELESAI TANPA ERROR FFmpeg")
 print("📁 Output:", output_path)
