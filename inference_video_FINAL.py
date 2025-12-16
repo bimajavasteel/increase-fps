@@ -1,6 +1,6 @@
 # ============================================================
-# Practical-RIFE – FINAL STABLE VIDEO INFERENCE
-# Compatible: RIFE v4.26 | Kaggle CUDA T4 | Python 3.10
+# Practical-RIFE – FINAL STABLE VIDEO INFERENCE (NO skvideo)
+# Compatible: RIFE v4.26 | Kaggle CUDA T4 | Python 3.10+
 # ============================================================
 
 import os
@@ -10,7 +10,6 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 from torch.nn import functional as F
-import skvideo.io
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -65,16 +64,16 @@ def load_rife_model(model_dir):
 model = load_rife_model(args.model)
 
 # ============================================================
-# VIDEO INPUT / OUTPUT
+# VIDEO INPUT / OUTPUT (OpenCV ONLY)
 # ============================================================
 cap = cv2.VideoCapture(args.video)
+if not cap.isOpened():
+    raise RuntimeError(f"Gagal membuka video: {args.video}")
+
 fps = cap.get(cv2.CAP_PROP_FPS)
 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-cap.release()
-
-reader = skvideo.io.vreader(args.video)
-first_frame = next(reader)
-h, w, _ = first_frame.shape
+w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
 out_fps = fps * args.multi
 output_path = args.output or f"{os.path.splitext(args.video)[0]}_{args.multi}X.mp4"
@@ -102,45 +101,56 @@ def frame_to_tensor(frame):
     return pad_tensor(t)
 
 # ============================================================
-# INTERPOLATION (UNIFIED API)
+# INTERPOLATION
 # ============================================================
 def interpolate(I0, I1, count):
-    outputs = []
+    outs = []
     for i in range(count):
         t = (i + 1) / (count + 1)
         out = model.inference(I0, I1, t, args.scale)
-        outputs.append(out)
-    return outputs
+        outs.append(out)
+    return outs
 
 # ============================================================
 # MAIN LOOP
 # ============================================================
-pbar = tqdm(total=total_frames, desc="Interpolating")
+ret, prev_frame = cap.read()
+if not ret:
+    raise RuntimeError("Tidak bisa membaca frame pertama")
 
-prev_frame = first_frame.copy()
+prev_frame = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2RGB)
 I0 = frame_to_tensor(prev_frame)
 
-for frame in reader:
+pbar = tqdm(total=total_frames - 1, desc="Interpolating")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     I1 = frame_to_tensor(frame)
 
     mids = interpolate(I0, I1, args.multi - 1)
 
-    # tulis frame asli
+    # frame asli
     writer.write(prev_frame[:, :, ::-1])
 
-    # tulis frame hasil interpolasi
+    # frame interpolasi
     for mid in mids:
         img = (mid[0].clamp(0, 1) * 255).byte().cpu().numpy().transpose(1, 2, 0)
         writer.write(img[:, :, ::-1])
 
-    prev_frame = frame.copy()
+    prev_frame = frame
     I0 = I1
     pbar.update(1)
 
-# tulis frame terakhir
+# frame terakhir
 writer.write(prev_frame[:, :, ::-1])
+
 pbar.close()
+cap.release()
 writer.release()
 
-print("✅ SELESAI")
+print("✅ SELESAI TANPA sk-video")
 print("📁 Output:", output_path)
