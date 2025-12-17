@@ -136,6 +136,7 @@ class AestheticProgressBar:
         self.start_time = time.time()
         self.frame_times = []
         self.processed_frames = 0
+        self.is_first_update = True
         
         # Print header sekali di awal
         self.print_header()
@@ -149,33 +150,24 @@ class AestheticProgressBar:
         print(f"⚙️  Mode  : {mode_str} | x{self.args.multi} FPS 🚀 | Batch {self.args.batch_size} 📦")
         print(f"{'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━':^50}")
         
-        # Print placeholder lines untuk konten yang akan diupdate
-        print("\n" * 6)  # 6 baris untuk konten yang akan diupdate
-        print(f"{'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━':^50}")
-        
-        # Simpan posisi awal untuk update
-        self.content_start_line = sys.stdout.tell() - 7 if hasattr(sys.stdout, 'tell') else None
-        
     def update(self, n=1):
         """Update progress bar tanpa clear screen"""
         self.processed_frames += n
         current_time = time.time()
         self.frame_times.append(current_time)
+        
+        # Keep only last 100 frame times
         if len(self.frame_times) > 100:
-            self.frame_times.pop(0)
+            self.frame_times = self.frame_times[-100:]
         
-        # Hapus baris konten sebelumnya (6 baris)
-        sys.stdout.write('\033[6A')  # Pindah ke atas 6 baris
-        sys.stdout.write('\033[K' * 6)  # Clear 6 baris
-        
-        # Hitung statistik
+        # Calculate statistics
         progress_percent = self.processed_frames / self.total_frames * 100
         elapsed_time = current_time - self.start_time
         avg_time_per_frame = elapsed_time / max(self.processed_frames, 1)
         
         # Progress bar
         bar_length = 20
-        filled_length = int(bar_length * progress_percent // 100)
+        filled_length = min(int(bar_length * progress_percent / 100), bar_length)
         bar = '🟩' * filled_length + '⬛' * (bar_length - filled_length)
         
         # ETA calculation
@@ -183,7 +175,10 @@ class AestheticProgressBar:
         eta_seconds = remaining_frames * avg_time_per_frame
         
         # GPU utilization
-        gpu_mem = torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated() * 100 if torch.cuda.is_available() else 0
+        if torch.cuda.is_available():
+            gpu_mem = torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated() * 100
+        else:
+            gpu_mem = 0
         
         # Status message berdasarkan performa
         if avg_time_per_frame < 0.02:
@@ -199,18 +194,52 @@ class AestheticProgressBar:
             status = "GPU Santai Aja"
             status_emoji = "🐢"
         
-        # Tampilkan konten yang diperbarui
-        print(f"{bar}  {progress_percent:.2f}% 😎")
-        print(f"🎞️  Frame  : {self.processed_frames} / {int(self.total_frames)} 🧩")
-        print(f"🚀 FPS OUT : {self.args.fps:.2f} ⚡⚡")
-        print(f"⏱️  Speed  : {avg_time_per_frame:.3f}s / frame 🕒")
-        print(f"⏳ ETA    : {self.format_time(eta_seconds)} ⌛")
-        print(f"🔥 GPU    : {gpu_mem:.1f}% {'🥵' if gpu_mem > 80 else '😊'}")
-        
-        # Kembali ke posisi untuk status
-        sys.stdout.write('\033[1A')  # Pindah ke atas 1 baris
-        sys.stdout.write('\033[K')  # Clear baris status
-        print(f"💥 STATUS : {status_emoji} {status}")
+        # Untuk update pertama, cetak semua baris
+        if self.is_first_update:
+            print()  # Baris kosong sebelum konten
+            print(f"{bar}  {progress_percent:.2f}% 😎")
+            print(f"🎞️  Frame  : {self.processed_frames} / {int(self.total_frames)} 🧩")
+            print(f"🚀 FPS OUT : {self.args.fps:.2f} ⚡⚡")
+            print(f"⏱️  Speed  : {avg_time_per_frame:.3f}s / frame 🕒")
+            print(f"⏳ ETA    : {self.format_time(eta_seconds)} ⌛")
+            print(f"🔥 GPU    : {gpu_mem:.1f}% {'🥵' if gpu_mem > 80 else '😊'}")
+            print(f"{'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━':^50}")
+            print(f"💥 STATUS : {status_emoji} {status}")
+            print(f"{'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━':^50}")
+            self.is_first_update = False
+        else:
+            # Move cursor up 9 lines (konten + separator + status)
+            print('\033[9A', end='')
+            
+            # Update progress bar line
+            print(f"{bar}  {progress_percent:.2f}% 😎")
+            
+            # Update frame count line
+            print(f"🎞️  Frame  : {self.processed_frames} / {int(self.total_frames)} 🧩")
+            
+            # Update FPS line
+            print(f"🚀 FPS OUT : {self.args.fps:.2f} ⚡⚡")
+            
+            # Update speed line
+            print(f"⏱️  Speed  : {avg_time_per_frame:.3f}s / frame 🕒")
+            
+            # Update ETA line
+            print(f"⏳ ETA    : {self.format_time(eta_seconds)} ⌛")
+            
+            # Update GPU line
+            print(f"🔥 GPU    : {gpu_mem:.1f}% {'🥵' if gpu_mem > 80 else '😊'}")
+            
+            # Update separator
+            print(f"{'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━':^50}")
+            
+            # Update status line
+            print(f"💥 STATUS : {status_emoji} {status}")
+            
+            # Update bottom separator
+            print(f"{'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━':^50}")
+            
+            # Move cursor to end
+            print('\033[0B', end='')
         
         # Flush output
         sys.stdout.flush()
@@ -224,21 +253,26 @@ class AestheticProgressBar:
     
     def close(self):
         """Final display when done"""
-        # Hapus baris konten sebelumnya
-        sys.stdout.write('\033[6A')
-        sys.stdout.write('\033[K' * 6)
+        # Move cursor up 9 lines
+        print('\033[9A', end='')
         
-        # Tampilkan hasil akhir
+        # Calculate final statistics
         elapsed_time = time.time() - self.start_time
-        avg_fps = self.total_frames / elapsed_time if elapsed_time > 0 else 0
+        avg_fps = self.processed_frames / elapsed_time if elapsed_time > 0 else 0
         
+        # Update with final values
         print(f"{'🟩' * 20}  100.00% 🎉")
         print(f"🎞️  Frame  : {int(self.total_frames)} / {int(self.total_frames)} ✅")
         print(f"🚀 Avg FPS : {avg_fps:.2f} ⚡⚡⚡")
         print(f"⏱️  Total   : {self.format_time(elapsed_time)} 🕒")
         print(f"📊 Speed   : {elapsed_time/self.total_frames:.3f}s/frame")
-        print(f"🏁 STATUS  : COMPLETED! 🎊")
+        print(f"🔥 GPU     : FINISHED! ✅")
+        print(f"{'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━':^50}")
+        print(f"💥 STATUS  : COMPLETED! 🎊")
+        print(f"{'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━':^50}")
         
+        # Move cursor down and flush
+        print('\033[0B')
         sys.stdout.flush()
 
 parser = argparse.ArgumentParser(description='Interpolation for a pair of images')
