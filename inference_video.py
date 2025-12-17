@@ -209,7 +209,7 @@ class AestheticProgressBar:
             self.is_first_update = False
         else:
             # Move cursor up 9 lines (konten + separator + status)
-            print('\033[9A', end='')
+            sys.stdout.write('\033[9A')
             
             # Update progress bar line
             print(f"{bar}  {progress_percent:.2f}% 😎")
@@ -239,7 +239,7 @@ class AestheticProgressBar:
             print(f"{'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━':^50}")
             
             # Move cursor to end
-            print('\033[0B', end='')
+            sys.stdout.write('\033[0B')
         
         # Flush output
         sys.stdout.flush()
@@ -254,7 +254,7 @@ class AestheticProgressBar:
     def close(self):
         """Final display when done"""
         # Move cursor up 9 lines
-        print('\033[9A', end='')
+        sys.stdout.write('\033[9A')
         
         # Calculate final statistics
         elapsed_time = time.time() - self.start_time
@@ -271,8 +271,8 @@ class AestheticProgressBar:
         print(f"💥 STATUS  : COMPLETED! 🎊")
         print(f"{'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━':^50}")
         
-        # Move cursor down and flush
-        print('\033[0B')
+        # Move cursor down
+        sys.stdout.write('\033[0B\n')
         sys.stdout.flush()
 
 parser = argparse.ArgumentParser(description='Interpolation for a pair of images')
@@ -425,9 +425,6 @@ ph = ((h - 1) // tmp + 1) * tmp
 pw = ((w - 1) // tmp + 1) * tmp
 padding = (0, pw - w, 0, ph - h)
 
-# Create aesthetic progress bar
-progress_bar = AestheticProgressBar(tot_frame, gpu_name, args)
-
 if args.montage:
     lastframe = lastframe[:, left: left + w]
 
@@ -462,6 +459,10 @@ with torch.no_grad():
     except Exception as e:
         print(f"GPU warm-up failed: {e}")
         print("Continuing without warm-up...")
+
+# BUAT PROGRESS BAR SETELAH WARM-UP SELESAI
+print()  # Baris kosong sebelum progress bar
+progress_bar = AestheticProgressBar(tot_frame, gpu_name, args)
 
 # Batch processing untuk meningkatkan throughput
 frame_batch = []
