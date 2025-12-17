@@ -6,14 +6,18 @@ import numpy as np
 from tqdm import tqdm
 from torch.nn import functional as F
 import warnings
+import _thread
 import skvideo.io
+from queue import Queue
+from concurrent.futures import ThreadPoolExecutor
 from model.pytorch_msssim import ssim_matlab
+import time
 
 warnings.filterwarnings("ignore")
 
-# =========================================================
-# AUDIO TRANSFER
-# =========================================================
+# =========================
+# Audio Transfer
+# =========================
 def transferAudio(sourceVideo, targetVideo):
     import shutil
     tempAudioFileName = "./temp/audio.mkv"
@@ -42,136 +46,134 @@ def transferAudio(sourceVideo, targetVideo):
 
     shutil.rmtree("temp")
 
-# =========================================================
-# ARGUMENTS
-# =========================================================
+
+# =========================
+# CUDA Parallel Processor
+# =========================
+class CUDAParallelProcessor:
+    def __init__(self, model, args):
+        self.model = model
+        self.args = args
+        self.executor = ThreadPoolExecutor(max_workers=min(4, torch.cuda.device_count() * 2))
+
+    def interpolate(self, I0, I1):
+        if self.model.version >= 3.9:
+            return [
+                self.model.inference(I0, I1, (i + 1) / self.args.multi, self.args.scale)
+                for i in range(self.args.multi - 1)
+            ]
+        else:
+            return self.model.make_inference(I0, I1, self.args.multi - 1)
+
+    def process_pair(self, I0, I1, lastframe):
+        I0s = F.interpolate(I0, (32, 32), mode="bilinear", align_corners=False)
+        I1s = F.interpolate(I1, (32, 32), mode="bilinear", align_corners=False)
+        ssim = ssim_matlab(I0s[:, :3], I1s[:, :3])
+
+        if ssim > 0.996:
+            mids = [I1] * (self.args.multi - 1)
+        elif ssim < 0.2:
+            mids = [I0] * (self.args.multi - 1)
+        else:
+            mids = self.interpolate(I0, I1)
+
+        frames = [lastframe]
+        for m in mids:
+            frames.append((m[0] * 255).byte().cpu().numpy().transpose(1, 2, 0))
+        return frames
+
+
+# =========================
+# Argparse
+# =========================
 parser = argparse.ArgumentParser()
-parser.add_argument('--video', type=str, required=True)
-parser.add_argument('--output', type=str)
-parser.add_argument('--model', type=str, default='train_log')
-parser.add_argument('--multi', type=int, default=2)
-parser.add_argument('--scale', type=float, default=1.0)
-parser.add_argument('--fp16', action='store_true')
-parser.add_argument('--fps', type=int)
-parser.add_argument('--ext', type=str, default='mp4')
+parser.add_argument("--video", type=str)
+parser.add_argument("--output", type=str)
+parser.add_argument("--model", default="train_log")
+parser.add_argument("--multi", type=int, default=2)
+parser.add_argument("--scale", type=float, default=1.0)
+parser.add_argument("--fp16", action="store_true")
+parser.add_argument("--ext", default="mp4")
 args = parser.parse_args()
 
-# =========================================================
-# CUDA SETUP (NO WARM-UP)
-# =========================================================
+# =========================
+# Device
+# =========================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.set_grad_enabled(False)
+torch.backends.cudnn.benchmark = True
 
-if torch.cuda.is_available():
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = True
-    if args.fp16:
-        torch.set_default_tensor_type(torch.cuda.HalfTensor)
-
-# =========================================================
-# CYBERPUNK HEADER
-# =========================================================
-gpu_name = torch.cuda.get_device_name() if torch.cuda.is_available() else "CPU"
-print("\n\033[95m╔══════════════════════════════════════╗")
-print("║   ⚡ CYBERPUNK RIFE INTERPOLATOR ⚡   ║")
-print("╠══════════════════════════════════════╣")
-print(f"║ GPU     : {gpu_name:<27}║")
-print(f"║ SCALE   : {args.scale:<27}║")
-print(f"║ MULTI   : {args.multi:<27}║")
-print("╚══════════════════════════════════════╝\033[0m\n")
-
-# =========================================================
-# LOAD MODEL
-# =========================================================
+# =========================
+# Model Load
+# =========================
 from train_log.RIFE_HDv3 import Model
 model = Model()
 model.load_model(args.model, -1)
 model.eval()
 model.device()
 
-# =========================================================
-# VIDEO IO
-# =========================================================
-videogen = skvideo.io.vreader(args.video)
+processor = CUDAParallelProcessor(model, args)
+
+# =========================
+# Video IO
+# =========================
 cap = cv2.VideoCapture(args.video)
-fps_src = cap.get(cv2.CAP_PROP_FPS)
-tot_frame = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+fps = cap.get(cv2.CAP_PROP_FPS)
+total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 cap.release()
 
-lastframe = next(videogen)
+reader = skvideo.io.vreader(args.video)
+lastframe = next(reader)
+
 h, w, _ = lastframe.shape
+fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+out_name = args.output or f"out_{args.multi}x.{args.ext}"
+writer = cv2.VideoWriter(out_name, fourcc, fps * args.multi, (w, h))
 
-fps_out = args.fps if args.fps else fps_src * args.multi
-
-if args.output:
-    out_name = args.output
-else:
-    base, _ = os.path.splitext(args.video)
-    out_name = f"{base}_{args.multi}X.{args.ext}"
-
-fourcc = cv2.VideoWriter_fourcc('m','p','4','v')
-vid_out = cv2.VideoWriter(out_name, fourcc, fps_out, (w, h))
-
-# =========================================================
-# PADDING
-# =========================================================
-tmp = max(128, int(128 / args.scale))
-ph = ((h - 1) // tmp + 1) * tmp
-pw = ((w - 1) // tmp + 1) * tmp
+# =========================
+# Padding
+# =========================
+ph = ((h - 1) // 64 + 1) * 64
+pw = ((w - 1) // 64 + 1) * 64
 padding = (0, pw - w, 0, ph - h)
 
-def pad(x):
-    return F.pad(x, padding)
+def to_tensor(frame):
+    t = torch.from_numpy(frame.transpose(2, 0, 1)).unsqueeze(0).float().to(device) / 255.
+    t = F.pad(t, padding)
+    return t.half() if args.fp16 else t
 
-# =========================================================
-# CYBERPUNK PROGRESS BAR
-# =========================================================
+I1 = to_tensor(lastframe)
+
+# =========================
+# Progress Bar (PRODUCTION)
+# =========================
+start_time = time.time()
 pbar = tqdm(
-    total=tot_frame,
-    desc="\033[96m⚡ NEURAL FLOW\033[0m",
+    total=total_frames,
     ncols=100,
-    bar_format="\033[95m{l_bar}{bar}\033[0m | {n_fmt}/{total_fmt} "
-               "[⏱ {elapsed} < {remaining} | 🚀 {rate_fmt}]"
+    bar_format="🎞️ {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
 )
 
-# =========================================================
-# PROCESS LOOP
-# =========================================================
-I1 = pad(torch.from_numpy(lastframe.transpose(2,0,1)).to(device).unsqueeze(0).float() / 255.)
-
-for frame in videogen:
+# =========================
+# Main Loop
+# =========================
+for frame in reader:
     I0 = I1
-    I1 = pad(torch.from_numpy(frame.transpose(2,0,1)).to(device).unsqueeze(0).float() / 255.)
+    I1 = to_tensor(frame)
 
-    I0s = F.interpolate(I0, (32,32))
-    I1s = F.interpolate(I1, (32,32))
-    ssim = ssim_matlab(I0s[:,:3], I1s[:,:3])
+    frames = processor.process_pair(I0, I1, lastframe)
+    for f in frames:
+        writer.write(f[:, :, ::-1])
 
-    if ssim < 0.2:
-        mids = [I0] * (args.multi - 1)
-    else:
-        mids = []
-        for i in range(args.multi - 1):
-            t = (i + 1) / args.multi
-            mids.append(model.inference(I0, I1, t, args.scale))
-
-    vid_out.write((I0[0]*255).byte().cpu().numpy().transpose(1,2,0)[:h,:w])
-    for m in mids:
-        vid_out.write((m[0]*255).byte().cpu().numpy().transpose(1,2,0)[:h,:w])
-
+    lastframe = frame
     pbar.update(1)
 
-vid_out.write((I1[0]*255).byte().cpu().numpy().transpose(1,2,0)[:h,:w])
 pbar.close()
-vid_out.release()
+writer.release()
 
-# =========================================================
-# AUDIO
-# =========================================================
-try:
-    transferAudio(args.video, out_name)
-except:
-    print("⚠️  Audio skipped")
+# =========================
+# Audio Merge
+# =========================
+transferAudio(args.video, out_name)
 
-print("\n\033[92m✔ PROCESS COMPLETE — SYSTEM STABLE\033[0m")
-print("\033[92m✔ VIDEO OUTPUT READY\033[0m\n")
+print("✅ DONE | Interpolation selesai dengan progress bar real-time.")
