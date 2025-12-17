@@ -6,17 +6,14 @@ import numpy as np
 from tqdm import tqdm
 from torch.nn import functional as F
 import warnings
-import _thread
 import skvideo.io
-from queue import Queue
-from concurrent.futures import ThreadPoolExecutor
 from model.pytorch_msssim import ssim_matlab
 
 warnings.filterwarnings("ignore")
 
-# =========================
+# =========================================================
 # AUDIO TRANSFER
-# =========================
+# =========================================================
 def transferAudio(sourceVideo, targetVideo):
     import shutil
     tempAudioFileName = "./temp/audio.mkv"
@@ -38,7 +35,6 @@ def transferAudio(sourceVideo, targetVideo):
         os.system(f'ffmpeg -y -i "{targetNoAudio}" -i {tempAudioFileName} -c copy "{targetVideo}"')
         if os.path.getsize(targetVideo) == 0:
             os.rename(targetNoAudio, targetVideo)
-            print("Audio merge failed")
         else:
             os.remove(targetNoAudio)
     else:
@@ -46,28 +42,23 @@ def transferAudio(sourceVideo, targetVideo):
 
     shutil.rmtree("temp")
 
-# =========================
+# =========================================================
 # ARGUMENTS
-# =========================
+# =========================================================
 parser = argparse.ArgumentParser()
-parser.add_argument('--video', type=str)
+parser.add_argument('--video', type=str, required=True)
 parser.add_argument('--output', type=str)
-parser.add_argument('--img', type=str)
 parser.add_argument('--model', type=str, default='train_log')
 parser.add_argument('--multi', type=int, default=2)
 parser.add_argument('--scale', type=float, default=1.0)
 parser.add_argument('--fp16', action='store_true')
 parser.add_argument('--fps', type=int)
-parser.add_argument('--png', action='store_true')
 parser.add_argument('--ext', type=str, default='mp4')
-parser.add_argument('--batch_size', type=int, default=4)
 args = parser.parse_args()
 
-assert args.video or args.img
-
-# =========================
+# =========================================================
 # CUDA SETUP (NO WARM-UP)
-# =========================
+# =========================================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.set_grad_enabled(False)
 
@@ -76,23 +67,41 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
     if args.fp16:
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
-    print("GPU:", torch.cuda.get_device_name())
 
-# =========================
+# =========================================================
+# CYBERPUNK HEADER
+# =========================================================
+gpu_name = torch.cuda.get_device_name() if torch.cuda.is_available() else "CPU"
+print("\n\033[95m╔══════════════════════════════════════╗")
+print("║   ⚡ CYBERPUNK RIFE INTERPOLATOR ⚡   ║")
+print("╠══════════════════════════════════════╣")
+print(f"║ GPU     : {gpu_name:<27}║")
+print(f"║ SCALE   : {args.scale:<27}║")
+print(f"║ MULTI   : {args.multi:<27}║")
+print("╚══════════════════════════════════════╝\033[0m\n")
+
+# =========================================================
 # LOAD MODEL
-# =========================
+# =========================================================
 from train_log.RIFE_HDv3 import Model
 model = Model()
 model.load_model(args.model, -1)
 model.eval()
 model.device()
 
-# =========================
+# =========================================================
 # VIDEO IO
-# =========================
+# =========================================================
 videogen = skvideo.io.vreader(args.video)
+cap = cv2.VideoCapture(args.video)
+fps_src = cap.get(cv2.CAP_PROP_FPS)
+tot_frame = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+cap.release()
+
 lastframe = next(videogen)
 h, w, _ = lastframe.shape
+
+fps_out = args.fps if args.fps else fps_src * args.multi
 
 if args.output:
     out_name = args.output
@@ -100,15 +109,12 @@ else:
     base, _ = os.path.splitext(args.video)
     out_name = f"{base}_{args.multi}X.{args.ext}"
 
-fps_src = cv2.VideoCapture(args.video).get(cv2.CAP_PROP_FPS)
-fps_out = args.fps if args.fps else fps_src * args.multi
-
 fourcc = cv2.VideoWriter_fourcc('m','p','4','v')
 vid_out = cv2.VideoWriter(out_name, fourcc, fps_out, (w, h))
 
-# =========================
+# =========================================================
 # PADDING
-# =========================
+# =========================================================
 tmp = max(128, int(128 / args.scale))
 ph = ((h - 1) // tmp + 1) * tmp
 pw = ((w - 1) // tmp + 1) * tmp
@@ -117,10 +123,20 @@ padding = (0, pw - w, 0, ph - h)
 def pad(x):
     return F.pad(x, padding)
 
-# =========================
+# =========================================================
+# CYBERPUNK PROGRESS BAR
+# =========================================================
+pbar = tqdm(
+    total=tot_frame,
+    desc="\033[96m⚡ NEURAL FLOW\033[0m",
+    ncols=100,
+    bar_format="\033[95m{l_bar}{bar}\033[0m | {n_fmt}/{total_fmt} "
+               "[⏱ {elapsed} < {remaining} | 🚀 {rate_fmt}]"
+)
+
+# =========================================================
 # PROCESS LOOP
-# =========================
-pbar = tqdm()
+# =========================================================
 I1 = pad(torch.from_numpy(lastframe.transpose(2,0,1)).to(device).unsqueeze(0).float() / 255.)
 
 for frame in videogen:
@@ -146,15 +162,16 @@ for frame in videogen:
     pbar.update(1)
 
 vid_out.write((I1[0]*255).byte().cpu().numpy().transpose(1,2,0)[:h,:w])
-vid_out.release()
 pbar.close()
+vid_out.release()
 
-# =========================
+# =========================================================
 # AUDIO
-# =========================
+# =========================================================
 try:
     transferAudio(args.video, out_name)
 except:
-    print("Audio skipped")
+    print("⚠️  Audio skipped")
 
-print("DONE (NO WARM-UP)")
+print("\n\033[92m✔ PROCESS COMPLETE — SYSTEM STABLE\033[0m")
+print("\033[92m✔ VIDEO OUTPUT READY\033[0m\n")
